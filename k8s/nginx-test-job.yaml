@@ -1,0 +1,21 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mysql-test
+spec:
+  template:
+    spec:
+      containers:
+      - name: mysql-client
+        image: mysql:5.7
+        command:
+        - sh
+        - -c
+        - mysql -h mysql -u root -p$MYSQL_ROOT_PASSWORD -e "SHOW DATABASES;"
+        env:
+        - name: MYSQL_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mysql-secret
+              key: MYSQL_ROOT_PASSWORD
+      restartPolicy: Never
