@@ -109,9 +109,9 @@ resource "azurerm_linux_virtual_machine" "vm" {
   network_interface_ids = [azurerm_network_interface.nic.id]
 
   admin_ssh_key {
-    username   = "azureuser"
-    public_key = file("~/.ssh/id_rsa.pub")
-  }
+  username   = "azureuser"
+  public_key = var.ssh_public_key
+}
 
   os_disk {
     caching              = "ReadWrite"
@@ -167,7 +167,7 @@ resource "azurerm_linux_virtual_machine" "vm" {
     connection {
       type        = "ssh"
       user        = "azureuser"
-      private_key = file("~/.ssh/id_rsa")
+      private_key = var.ssh_private_key
       host        = azurerm_public_ip.vm_ip.ip_address
       timeout     = "30m"
     }
