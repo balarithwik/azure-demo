@@ -1,0 +1,65 @@
+name: Terraform Azure K8s CI/CD
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+
+env:
+  ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+  ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
+  ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+  ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repo
+      uses: actions/checkout@v4
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: 1.6.6
+
+    - name: Terraform Init
+      working-directory: terraform
+      run: terraform init
+
+    - name: Terraform Validate
+      working-directory: terraform
+      run: terraform validate
+
+    - name: Terraform Plan
+      working-directory: terraform
+      run: terraform plan
+
+    - name: Terraform Apply
+      working-directory: terraform
+      run: terraform apply -auto-approve
+
+    # ------------------------
+    # TESTING LAYER
+    # ------------------------
+    - name: Get VM Public IP
+      id: ip
+      working-directory: terraform
+      run: |
+        echo "VM_IP=$(terraform output -raw vm_public_ip)" >> $GITHUB_ENV
+
+    - name: Test Nginx
+      run: |
+        echo "Testing Nginx at http://$VM_IP"
+        sleep 60
+        curl -I http://$VM_IP:$(shuf -i30000-32767 -n1) || true
+
+    - name: SSH Test MySQL
+      run: |
+        ssh -o StrictHostKeyChecking=no azureuser@$VM_IP << 'EOF'
+        kubectl get pods
+        kubectl get svc
+        kubectl run mysql-test --rm -it --image=mysql:5.7 -- \
+          mysql -h mysql -u root -prootpass -e "SHOW DATABASES;"
+        EOF
