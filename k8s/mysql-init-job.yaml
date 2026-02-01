@@ -1,0 +1,25 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mysql-init-job
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: mysql-init
+        image: mysql:5.7
+        command: ["sh", "-c"]
+        args:
+          - |
+            echo "Waiting for MySQL...";
+            sleep 40;
+            mysql -h mysql -u root -prootpass < /sql/mysql-init.sql
+        volumeMounts:
+        - name: sql-volume
+          mountPath: /sql
+      volumes:
+      - name: sql-volume
+        configMap:
+          name: mysql-init-sql
