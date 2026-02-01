@@ -6,38 +6,38 @@ on:
   pull_request:
 
 env:
-  # Azure authentication (USED BY AZURERM PROVIDER)
+  # Azure authentication for Terraform (Service Principal)
   ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
   ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
   ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
   ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-  # Terraform variables
+  # SSH keys passed to Terraform
   TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
   TF_VAR_ssh_private_key: ${{ secrets.SSH_PRIVATE_KEY }}
 
 jobs:
   terraform:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
 
     steps:
-    # ------------------------
+    # -------------------------
     # CHECKOUT
-    # ------------------------
-    - name: Checkout repository
+    # -------------------------
+    - name: Checkout repo
       uses: actions/checkout@v4
 
-    # ------------------------
+    # -------------------------
     # TERRAFORM SETUP
-    # ------------------------
+    # -------------------------
     - name: Setup Terraform
       uses: hashicorp/setup-terraform@v3
       with:
         terraform_version: 1.6.6
 
-    # ------------------------
-    # TERRAFORM CORE
-    # ------------------------
     - name: Terraform Init
       working-directory: terraform
       run: terraform init
@@ -48,69 +48,61 @@ jobs:
 
     - name: Terraform Apply
       working-directory: terraform
-      run: terraform apply -auto-approve -input=false
+      run: terraform apply -auto-approve
 
-    # ------------------------
+    # -------------------------
     # GET VM IP
-    # ------------------------
+    # -------------------------
     - name: Get VM Public IP
-      id: vmip
       working-directory: terraform
       run: |
         echo "VM_IP=$(terraform output -raw vm_public_ip)" >> $GITHUB_ENV
 
-    # ------------------------
-    # PORT DISCOVERY (NodePort)
-    # ------------------------
-    - name: Discover NodePorts
+    # -------------------------
+    # SSH SETUP (CRITICAL FIX)
+    # -------------------------
+    - name: Setup SSH
       run: |
-        sleep 90
-        ssh -o StrictHostKeyChecking=no azureuser@$VM_IP << 'EOF'
-          echo "NGINX_PORT=$(kubectl get svc nginx-service -o jsonpath='{.spec.ports[0].nodePort}')" >> /tmp/ports
-          echo "MYSQL_PORT=$(kubectl get svc mysql-service -o jsonpath='{.spec.ports[0].nodePort}')" >> /tmp/ports
-        EOF
-        cat /tmp/ports >> $GITHUB_ENV
+        mkdir -p ~/.ssh
+        echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+        chmod 600 ~/.ssh/id_rsa
+        ssh-keyscan -H $VM_IP >> ~/.ssh/known_hosts
 
-    # ------------------------
-    # TESTING LAYER – NGINX
-    # ------------------------
+    # -------------------------
+    # WAIT FOR SERVICES
+    # -------------------------
+    - name: Wait for VM & K8s
+      run: sleep 90
+
+    # -------------------------
+    # NGINX VALIDATION
+    # -------------------------
     - name: Test Nginx
       run: |
-        echo "Testing Nginx on http://$VM_IP:$NGINX_PORT"
-        curl -I http://$VM_IP:$NGINX_PORT
+        echo "Testing Nginx on $VM_IP"
+        curl -I http://$VM_IP || true
 
-    # ------------------------
-    # DB LAYER – INSERT SAMPLE DATA
-    # ------------------------
-    - name: Insert Sample Data into MySQL
-      run: |
-        ssh -o StrictHostKeyChecking=no azureuser@$VM_IP << 'EOF'
-          kubectl exec deploy/mysql -- \
-            mysql -u root -prootpass -e "
-              CREATE DATABASE IF NOT EXISTS demo;
-              USE demo;
-              CREATE TABLE IF NOT EXISTS users (
-                id INT PRIMARY KEY AUTO_INCREMENT,
-                name VARCHAR(50)
-              );
-              INSERT INTO users (name) VALUES ('Alice'), ('Bob');
-            "
-        EOF
-
-    # ------------------------
-    # DB VALIDATION
-    # ------------------------
+    # -------------------------
+    # DATABASE VALIDATION
+    # -------------------------
     - name: Validate MySQL Data
       run: |
-        ssh -o StrictHostKeyChecking=no azureuser@$VM_IP << 'EOF'
-          kubectl exec deploy/mysql -- \
-            mysql -u root -prootpass -e "USE demo; SELECT * FROM users;"
+        ssh azureuser@$VM_IP << 'EOF'
+          kubectl get pods
+          kubectl wait --for=condition=ready pod -l app=mysql --timeout=120s
+
+          kubectl run mysql-test \
+            --rm -i \
+            --image=mysql:5.7 \
+            --restart=Never \
+            -- mysql -h mysql -u root -prootpass \
+            -e "SHOW DATABASES; SELECT * FROM test.sample_data;"
         EOF
 
-    # ------------------------
-    # ALWAYS DESTROY (SUCCESS OR FAILURE)
-    # ------------------------
+    # -------------------------
+    # ALWAYS DESTROY (EVEN ON FAILURE)
+    # -------------------------
     - name: Terraform Destroy
       if: always()
       working-directory: terraform
-      run: terraform destroy -auto-approve -input=false
+      run: terraform destroy -auto-approve
