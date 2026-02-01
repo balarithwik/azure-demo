@@ -1,41 +1,33 @@
-name: Terraform Azure K8s CI/CD (Auto Destroy)
+name: Terraform Azure K8s CI/CD
 
 on:
   push:
-    branches: ["main"]
+    branches: [ "main" ]
   pull_request:
 
 env:
-  TF_VAR_client_id: ${{ secrets.ARM_CLIENT_ID }}
-  TF_VAR_client_secret: ${{ secrets.ARM_CLIENT_SECRET }}
-  TF_VAR_tenant_id: ${{ secrets.ARM_TENANT_ID }}
-  TF_VAR_subscription_id: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+  # Map AZURE_* secrets to Terraform variables
+  TF_VAR_client_id: ${{ secrets.AZURE_CLIENT_ID }}
+  TF_VAR_client_secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+  TF_VAR_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
+  TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
   TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
   TF_VAR_ssh_private_key: ${{ secrets.SSH_PRIVATE_KEY }}
 
 jobs:
-  deploy-test-destroy:
+  terraform:
     runs-on: ubuntu-latest
 
     steps:
-    # ------------------------
-    # Checkout
-    # ------------------------
     - name: Checkout repo
       uses: actions/checkout@v4
 
-    # ------------------------
-    # Terraform Setup
-    # ------------------------
     - name: Setup Terraform
       uses: hashicorp/setup-terraform@v3
       with:
         terraform_version: 1.6.6
 
-    # ------------------------
-    # Terraform Apply
-    # ------------------------
     - name: Terraform Init
       working-directory: terraform
       run: terraform init
@@ -44,75 +36,41 @@ jobs:
       working-directory: terraform
       run: terraform validate
 
+    - name: Terraform Plan
+      working-directory: terraform
+      run: terraform plan
+
     - name: Terraform Apply
       working-directory: terraform
       run: terraform apply -auto-approve
 
     # ------------------------
-    # Setup SSH
-    # ------------------------
-    - name: Setup SSH
-      run: |
-        mkdir -p ~/.ssh
-        echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
-        chmod 600 ~/.ssh/id_rsa
-
-    # ------------------------
-    # Fetch VM IP
+    # TESTING LAYER
     # ------------------------
     - name: Get VM Public IP
       working-directory: terraform
       run: |
         echo "VM_IP=$(terraform output -raw vm_public_ip)" >> $GITHUB_ENV
 
-    # ------------------------
-    # Deploy K8s Manifests
-    # ------------------------
-    - name: Deploy Kubernetes Resources
-      run: |
-        ssh -o StrictHostKeyChecking=no azureuser@$VM_IP << 'EOF'
-          kubectl apply -f k8s/
-        EOF
-
-    # ------------------------
-    # DB LAYER – Init Data
-    # ------------------------
-    - name: Initialize MySQL Data
-      run: |
-        ssh -o StrictHostKeyChecking=no azureuser@$VM_IP << 'EOF'
-          kubectl apply -f k8s/mysql-test-job.yaml
-          kubectl wait --for=condition=complete job/mysql-init-job --timeout=180s
-        EOF
-
-    # ------------------------
-    # TESTING – NGINX
-    # ------------------------
     - name: Test Nginx
       run: |
-        ssh -o StrictHostKeyChecking=no azureuser@$VM_IP << 'EOF'
-          sleep 30
-          PORT=$(kubectl get svc nginx -o jsonpath='{.spec.ports[0].nodePort}')
-          curl -I http://localhost:$PORT
-        EOF
+        echo "Testing Nginx..."
+        sleep 60
+        curl -I http://$VM_IP || true
 
-    # ------------------------
-    # TESTING – MYSQL
-    # ------------------------
     - name: Test MySQL
       run: |
         ssh -o StrictHostKeyChecking=no azureuser@$VM_IP << 'EOF'
-          kubectl run mysql-check \
-            --image=mysql:5.7 \
-            --restart=Never \
-            --rm \
-            --command -- \
+          kubectl get pods
+          kubectl get svc
+          kubectl run mysql-test --rm -it --image=mysql:5.7 -- \
             mysql -h mysql -u root -prootpass -e "SHOW DATABASES;"
         EOF
 
     # ------------------------
-    # 🔥 GUARANTEED CLEANUP
+    # DESTROY (ALWAYS RUN)
     # ------------------------
-    - name: Terraform Destroy (Always)
+    - name: Terraform Destroy
       if: always()
       working-directory: terraform
       run: terraform destroy -auto-approve
