@@ -1,4 +1,4 @@
-name: Terraform Azure K8s CI/CD
+name: Terraform Azure K8s CI/CD (Auto Destroy)
 
 on:
   push:
@@ -15,12 +15,12 @@ env:
   TF_VAR_ssh_private_key: ${{ secrets.SSH_PRIVATE_KEY }}
 
 jobs:
-  deploy:
+  deploy-test-destroy:
     runs-on: ubuntu-latest
 
     steps:
     # ------------------------
-    # Checkout Source
+    # Checkout
     # ------------------------
     - name: Checkout repo
       uses: actions/checkout@v4
@@ -34,7 +34,7 @@ jobs:
         terraform_version: 1.6.6
 
     # ------------------------
-    # Terraform Workflow
+    # Terraform Apply
     # ------------------------
     - name: Terraform Init
       working-directory: terraform
@@ -44,16 +44,12 @@ jobs:
       working-directory: terraform
       run: terraform validate
 
-    - name: Terraform Plan
-      working-directory: terraform
-      run: terraform plan
-
     - name: Terraform Apply
       working-directory: terraform
       run: terraform apply -auto-approve
 
     # ------------------------
-    # Setup SSH for VM Access
+    # Setup SSH
     # ------------------------
     - name: Setup SSH
       run: |
@@ -62,26 +58,26 @@ jobs:
         chmod 600 ~/.ssh/id_rsa
 
     # ------------------------
-    # Get VM Public IP
+    # Fetch VM IP
     # ------------------------
-    - name: Fetch VM Public IP
+    - name: Get VM Public IP
       working-directory: terraform
       run: |
         echo "VM_IP=$(terraform output -raw vm_public_ip)" >> $GITHUB_ENV
 
     # ------------------------
-    # Deploy Kubernetes YAMLs
+    # Deploy K8s Manifests
     # ------------------------
-    - name: Deploy Kubernetes Manifests
+    - name: Deploy Kubernetes Resources
       run: |
         ssh -o StrictHostKeyChecking=no azureuser@$VM_IP << 'EOF'
           kubectl apply -f k8s/
         EOF
 
     # ------------------------
-    # DB LAYER – Initialize Database
+    # DB LAYER – Init Data
     # ------------------------
-    - name: Initialize MySQL Database
+    - name: Initialize MySQL Data
       run: |
         ssh -o StrictHostKeyChecking=no azureuser@$VM_IP << 'EOF'
           kubectl apply -f k8s/mysql-test-job.yaml
@@ -89,27 +85,34 @@ jobs:
         EOF
 
     # ------------------------
-    # TESTING LAYER – NGINX
+    # TESTING – NGINX
     # ------------------------
-    - name: Test Nginx Service
+    - name: Test Nginx
       run: |
         ssh -o StrictHostKeyChecking=no azureuser@$VM_IP << 'EOF'
-          echo "Waiting for Nginx service..."
           sleep 30
-          NGINX_PORT=$(kubectl get svc nginx -o jsonpath='{.spec.ports[0].nodePort}')
-          curl -I http://localhost:$NGINX_PORT
+          PORT=$(kubectl get svc nginx -o jsonpath='{.spec.ports[0].nodePort}')
+          curl -I http://localhost:$PORT
         EOF
 
     # ------------------------
-    # TESTING LAYER – MYSQL
+    # TESTING – MYSQL
     # ------------------------
-    - name: Test MySQL Data
+    - name: Test MySQL
       run: |
         ssh -o StrictHostKeyChecking=no azureuser@$VM_IP << 'EOF'
-          kubectl run mysql-verify \
+          kubectl run mysql-check \
             --image=mysql:5.7 \
             --restart=Never \
             --rm \
             --command -- \
             mysql -h mysql -u root -prootpass -e "SHOW DATABASES;"
         EOF
+
+    # ------------------------
+    # 🔥 GUARANTEED CLEANUP
+    # ------------------------
+    - name: Terraform Destroy (Always)
+      if: always()
+      working-directory: terraform
+      run: terraform destroy -auto-approve
