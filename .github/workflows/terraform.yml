@@ -6,10 +6,10 @@ on:
   pull_request:
 
 env:
-  ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
-  ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
-  ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
-  ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+  TF_VAR_client_id: ${{ secrets.ARM_CLIENT_ID }}
+  TF_VAR_client_secret: ${{ secrets.ARM_CLIENT_SECRET }}
+  TF_VAR_tenant_id: ${{ secrets.ARM_TENANT_ID }}
+  TF_VAR_subscription_id: ${{ secrets.ARM_SUBSCRIPTION_ID }}
 
   TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
   TF_VAR_ssh_private_key: ${{ secrets.SSH_PRIVATE_KEY }}
