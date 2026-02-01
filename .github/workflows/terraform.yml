@@ -2,7 +2,7 @@ name: Terraform Azure K8s CI/CD
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   pull_request:
 
 env:
@@ -11,19 +11,31 @@ env:
   ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
   ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
 
+  TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
+  TF_VAR_ssh_private_key: ${{ secrets.SSH_PRIVATE_KEY }}
+
 jobs:
-  terraform:
+  deploy:
     runs-on: ubuntu-latest
 
     steps:
+    # ------------------------
+    # Checkout Source
+    # ------------------------
     - name: Checkout repo
       uses: actions/checkout@v4
 
+    # ------------------------
+    # Terraform Setup
+    # ------------------------
     - name: Setup Terraform
       uses: hashicorp/setup-terraform@v3
       with:
         terraform_version: 1.6.6
 
+    # ------------------------
+    # Terraform Workflow
+    # ------------------------
     - name: Terraform Init
       working-directory: terraform
       run: terraform init
@@ -41,25 +53,63 @@ jobs:
       run: terraform apply -auto-approve
 
     # ------------------------
-    # TESTING LAYER
+    # Setup SSH for VM Access
     # ------------------------
-    - name: Get VM Public IP
-      id: ip
+    - name: Setup SSH
+      run: |
+        mkdir -p ~/.ssh
+        echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+        chmod 600 ~/.ssh/id_rsa
+
+    # ------------------------
+    # Get VM Public IP
+    # ------------------------
+    - name: Fetch VM Public IP
       working-directory: terraform
       run: |
         echo "VM_IP=$(terraform output -raw vm_public_ip)" >> $GITHUB_ENV
 
-    - name: Test Nginx
-      run: |
-        echo "Testing Nginx at http://$VM_IP"
-        sleep 60
-        curl -I http://$VM_IP:$(shuf -i30000-32767 -n1) || true
-
-    - name: SSH Test MySQL
+    # ------------------------
+    # Deploy Kubernetes YAMLs
+    # ------------------------
+    - name: Deploy Kubernetes Manifests
       run: |
         ssh -o StrictHostKeyChecking=no azureuser@$VM_IP << 'EOF'
-        kubectl get pods
-        kubectl get svc
-        kubectl run mysql-test --rm -it --image=mysql:5.7 -- \
-          mysql -h mysql -u root -prootpass -e "SHOW DATABASES;"
+          kubectl apply -f k8s/
+        EOF
+
+    # ------------------------
+    # DB LAYER – Initialize Database
+    # ------------------------
+    - name: Initialize MySQL Database
+      run: |
+        ssh -o StrictHostKeyChecking=no azureuser@$VM_IP << 'EOF'
+          kubectl apply -f k8s/mysql-test-job.yaml
+          kubectl wait --for=condition=complete job/mysql-init-job --timeout=180s
+        EOF
+
+    # ------------------------
+    # TESTING LAYER – NGINX
+    # ------------------------
+    - name: Test Nginx Service
+      run: |
+        ssh -o StrictHostKeyChecking=no azureuser@$VM_IP << 'EOF'
+          echo "Waiting for Nginx service..."
+          sleep 30
+          NGINX_PORT=$(kubectl get svc nginx -o jsonpath='{.spec.ports[0].nodePort}')
+          curl -I http://localhost:$NGINX_PORT
+        EOF
+
+    # ------------------------
+    # TESTING LAYER – MYSQL
+    # ------------------------
+    - name: Test MySQL Data
+      run: |
+        ssh -o StrictHostKeyChecking=no azureuser@$VM_IP << 'EOF'
+          kubectl run mysql-verify \
+            --image=mysql:5.7 \
+            --restart=Never \
+            --rm \
+            --command -- \
+            mysql -h mysql -u root -prootpass -e "SHOW DATABASES;"
         EOF
