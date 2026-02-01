@@ -1,0 +1,21 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mysql-test-job
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: mysql-test
+        image: mysql:5.7
+        command: ["sh", "-c"]
+        args:
+          - |
+            echo "Waiting for MySQL...";
+            sleep 30;
+            echo "Checking DB connection...";
+            mysql -h mysql -u root -prootpass -e "SHOW DATABASES;";
+            echo "Validating sample data...";
+            mysql -h mysql -u root -prootpass -e "USE demoapp; SELECT * FROM users;"
