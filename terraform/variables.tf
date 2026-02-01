@@ -1,10 +1,28 @@
+variable "client_id" {
+  type      = string
+  sensitive = true
+}
+
+variable "client_secret" {
+  type      = string
+  sensitive = true
+}
+
+variable "tenant_id" {
+  type      = string
+  sensitive = true
+}
+
+variable "subscription_id" {
+  type = string
+}
+
 variable "ssh_public_key" {
-  description = "SSH public key used to access the VM"
-  type        = string
+  type      = string
+  sensitive = true
 }
 
 variable "ssh_private_key" {
-  description = "SSH private key used by Terraform remote-exec"
-  type        = string
-  sensitive   = true
+  type      = string
+  sensitive = true
 }
