@@ -6,13 +6,13 @@ on:
   pull_request:
 
 env:
-  # Azure authentication (REQUIRED)
+  # Azure authentication (USED BY AZURERM PROVIDER)
   ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
   ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
   ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
   ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-  # Terraform input variables
+  # Terraform variables
   TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
   TF_VAR_ssh_private_key: ${{ secrets.SSH_PRIVATE_KEY }}
 
@@ -24,7 +24,7 @@ jobs:
     # ------------------------
     # CHECKOUT
     # ------------------------
-    - name: Checkout repo
+    - name: Checkout repository
       uses: actions/checkout@v4
 
     # ------------------------
@@ -36,72 +36,81 @@ jobs:
         terraform_version: 1.6.6
 
     # ------------------------
-    # TERRAFORM APPLY
+    # TERRAFORM CORE
     # ------------------------
     - name: Terraform Init
       working-directory: terraform
       run: terraform init
 
+    - name: Terraform Validate
+      working-directory: terraform
+      run: terraform validate
+
     - name: Terraform Apply
       working-directory: terraform
-      run: terraform apply -auto-approve
+      run: terraform apply -auto-approve -input=false
 
     # ------------------------
     # GET VM IP
     # ------------------------
     - name: Get VM Public IP
+      id: vmip
       working-directory: terraform
       run: |
         echo "VM_IP=$(terraform output -raw vm_public_ip)" >> $GITHUB_ENV
 
     # ------------------------
-    # WAIT FOR K8S
+    # PORT DISCOVERY (NodePort)
     # ------------------------
-    - name: Wait for Kubernetes
+    - name: Discover NodePorts
       run: |
-        sleep 60
-        ssh -o StrictHostKeyChecking=no azureuser@$VM_IP "kubectl get nodes"
+        sleep 90
+        ssh -o StrictHostKeyChecking=no azureuser@$VM_IP << 'EOF'
+          echo "NGINX_PORT=$(kubectl get svc nginx-service -o jsonpath='{.spec.ports[0].nodePort}')" >> /tmp/ports
+          echo "MYSQL_PORT=$(kubectl get svc mysql-service -o jsonpath='{.spec.ports[0].nodePort}')" >> /tmp/ports
+        EOF
+        cat /tmp/ports >> $GITHUB_ENV
 
     # ------------------------
-    # INSERT SAMPLE DB DATA
+    # TESTING LAYER – NGINX
     # ------------------------
-    - name: Insert Sample DB Data
+    - name: Test Nginx
+      run: |
+        echo "Testing Nginx on http://$VM_IP:$NGINX_PORT"
+        curl -I http://$VM_IP:$NGINX_PORT
+
+    # ------------------------
+    # DB LAYER – INSERT SAMPLE DATA
+    # ------------------------
+    - name: Insert Sample Data into MySQL
       run: |
         ssh -o StrictHostKeyChecking=no azureuser@$VM_IP << 'EOF'
-          kubectl apply -f k8s/mysql-configmap.yaml
-          kubectl apply -f k8s/mysql-test-job.yaml
-          kubectl wait --for=condition=complete job/mysql-init-job --timeout=180s
+          kubectl exec deploy/mysql -- \
+            mysql -u root -prootpass -e "
+              CREATE DATABASE IF NOT EXISTS demo;
+              USE demo;
+              CREATE TABLE IF NOT EXISTS users (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                name VARCHAR(50)
+              );
+              INSERT INTO users (name) VALUES ('Alice'), ('Bob');
+            "
         EOF
 
     # ------------------------
-    # MYSQL PORT FORWARD + VALIDATION
+    # DB VALIDATION
     # ------------------------
     - name: Validate MySQL Data
       run: |
         ssh -o StrictHostKeyChecking=no azureuser@$VM_IP << 'EOF'
-          kubectl port-forward svc/mysql 3306:3306 >/tmp/mysql-pf.log 2>&1 &
-          sleep 10
-          mysql -h 127.0.0.1 -u root -prootpass -e "
-            USE demo;
-            SELECT * FROM users;
-          "
+          kubectl exec deploy/mysql -- \
+            mysql -u root -prootpass -e "USE demo; SELECT * FROM users;"
         EOF
 
     # ------------------------
-    # NGINX PORT FORWARD + TEST
+    # ALWAYS DESTROY (SUCCESS OR FAILURE)
     # ------------------------
-    - name: Validate Nginx
-      run: |
-        ssh -o StrictHostKeyChecking=no azureuser@$VM_IP << 'EOF'
-          kubectl port-forward svc/nginx-service 8080:80 >/tmp/nginx-pf.log 2>&1 &
-          sleep 10
-          curl -I http://127.0.0.1:8080
-        EOF
-
-    # ------------------------
-    # ALWAYS CLEANUP
-    # ------------------------
-    - name: Terraform Destroy (Always)
+    - name: Terraform Destroy
       if: always()
       working-directory: terraform
-      run: terraform destroy -auto-approve
+      run: terraform destroy -auto-approve -input=false
