@@ -9,11 +9,25 @@ terraform {
 
 provider "azurerm" {
   features {}
-skip_provider_registration = true
+  skip_provider_registration = true
 }
 
 # -------------------------------
-# Resource Group
+# VARIABLES
+# -------------------------------
+variable "ssh_public_key" {
+  description = "SSH public key"
+  type        = string
+}
+
+variable "ssh_private_key" {
+  description = "SSH private key"
+  type        = string
+  sensitive   = true
+}
+
+# -------------------------------
+# RESOURCE GROUP
 # -------------------------------
 resource "azurerm_resource_group" "rg" {
   name     = "demo-rg"
@@ -21,7 +35,7 @@ resource "azurerm_resource_group" "rg" {
 }
 
 # -------------------------------
-# Networking
+# NETWORKING
 # -------------------------------
 resource "azurerm_virtual_network" "vnet" {
   name                = "demo-vnet"
@@ -38,7 +52,7 @@ resource "azurerm_subnet" "subnet" {
 }
 
 resource "azurerm_public_ip" "vm_ip" {
-  name                = "vm-public-ip"
+  name                = "demo-vm-ip"
   location            = azurerm_resource_group.rg.location
   resource_group_name = azurerm_resource_group.rg.name
   allocation_method   = "Static"
@@ -51,7 +65,7 @@ resource "azurerm_network_interface" "nic" {
   resource_group_name = azurerm_resource_group.rg.name
 
   ip_configuration {
-    name                          = "primary"
+    name                          = "internal"
     subnet_id                     = azurerm_subnet.subnet.id
     private_ip_address_allocation = "Dynamic"
     public_ip_address_id          = azurerm_public_ip.vm_ip.id
@@ -59,7 +73,7 @@ resource "azurerm_network_interface" "nic" {
 }
 
 # -------------------------------
-# Network Security Group
+# SECURITY GROUP
 # -------------------------------
 resource "azurerm_network_security_group" "nsg" {
   name                = "demo-nsg"
@@ -68,7 +82,7 @@ resource "azurerm_network_security_group" "nsg" {
 
   security_rule {
     name                       = "SSH"
-    priority                   = 1001
+    priority                   = 100
     direction                  = "Inbound"
     access                     = "Allow"
     protocol                   = "Tcp"
@@ -80,7 +94,7 @@ resource "azurerm_network_security_group" "nsg" {
 
   security_rule {
     name                       = "NodePort"
-    priority                   = 1002
+    priority                   = 200
     direction                  = "Inbound"
     access                     = "Allow"
     protocol                   = "Tcp"
@@ -97,7 +111,7 @@ resource "azurerm_network_interface_security_group_association" "assoc" {
 }
 
 # -------------------------------
-# Linux VM + Kubernetes Bootstrap
+# VM + KUBERNETES BOOTSTRAP
 # -------------------------------
 resource "azurerm_linux_virtual_machine" "vm" {
   name                = "demo-vm"
@@ -106,7 +120,9 @@ resource "azurerm_linux_virtual_machine" "vm" {
   size                = "Standard_D4s_v3"
   admin_username      = "azureuser"
 
-  network_interface_ids = [azurerm_network_interface.nic.id]
+  network_interface_ids = [
+    azurerm_network_interface.nic.id
+  ]
 
   admin_ssh_key {
     username   = "azureuser"
@@ -129,13 +145,22 @@ resource "azurerm_linux_virtual_machine" "vm" {
     inline = [
       "set -e",
 
+      "echo 'Waiting for cloud-init...'",
+      "while [ ! -f /var/lib/cloud/instance/boot-finished ]; do sleep 5; done",
+
       "sudo apt-get update -y",
-      "sudo apt-get install -y docker.io apt-transport-https ca-certificates curl",
+      "sudo apt-get install -y ca-certificates curl gnupg lsb-release software-properties-common",
+
+      "sudo add-apt-repository universe -y",
+      "sudo apt-get update -y",
+
+      "curl -fsSL https://get.docker.com | sudo sh",
       "sudo systemctl enable docker",
       "sudo systemctl start docker",
+      "sudo usermod -aG docker azureuser",
 
-      "curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.30/deb/Release.key | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/kubernetes.gpg",
-      "echo 'deb [signed-by=/etc/apt/trusted.gpg.d/kubernetes.gpg] https://pkgs.k8s.io/core:/stable:/v1.30/deb/ /' | sudo tee /etc/apt/sources.list.d/kubernetes.list",
+      "curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.30/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes.gpg",
+      "echo 'deb [signed-by=/etc/apt/keyrings/kubernetes.gpg] https://pkgs.k8s.io/core:/stable:/v1.30/deb/ /' | sudo tee /etc/apt/sources.list.d/kubernetes.list",
 
       "sudo apt-get update -y",
       "sudo apt-get install -y kubelet kubeadm kubectl",
@@ -148,10 +173,17 @@ resource "azurerm_linux_virtual_machine" "vm" {
       "sudo cp /etc/kubernetes/admin.conf /home/azureuser/.kube/config",
       "sudo chown azureuser:azureuser /home/azureuser/.kube/config",
 
-      "kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml || true",
+      "kubectl apply -f https://raw.githubusercontent.com/flannel-io/flannel/master/Documentation/kube-flannel.yml || true",
       "sleep 30",
 
       "kubectl taint nodes --all node-role.kubernetes.io/control-plane- || true",
+
+      "kubectl create deployment nginx --image=nginx || true",
+      "kubectl expose deployment nginx --type=NodePort --port=80 || true",
+
+      "kubectl create deployment mysql --image=mysql:5.7 || true",
+      "kubectl set env deployment/mysql MYSQL_ROOT_PASSWORD=rootpass || true",
+      "kubectl expose deployment mysql --type=NodePort --port=3306 || true",
 
       "kubectl get nodes",
       "kubectl get svc"
@@ -162,18 +194,14 @@ resource "azurerm_linux_virtual_machine" "vm" {
       user        = "azureuser"
       private_key = var.ssh_private_key
       host        = azurerm_public_ip.vm_ip.ip_address
-      timeout     = "30m"
+      timeout     = "45m"
     }
   }
 }
 
 # -------------------------------
-# Outputs
+# OUTPUTS
 # -------------------------------
 output "vm_public_ip" {
   value = azurerm_public_ip.vm_ip.ip_address
-}
-
-output "nginx_url" {
-  value = "http://${azurerm_public_ip.vm_ip.ip_address}"
 }
