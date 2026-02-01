@@ -2,16 +2,17 @@ name: Terraform Azure K8s CI/CD
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   pull_request:
 
 env:
-  # Map AZURE_* secrets to Terraform variables
-  TF_VAR_client_id: ${{ secrets.AZURE_CLIENT_ID }}
-  TF_VAR_client_secret: ${{ secrets.AZURE_CLIENT_SECRET }}
-  TF_VAR_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
-  TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+  # Azure authentication (REQUIRED)
+  ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+  ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+  ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+  ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
+  # Terraform input variables
   TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
   TF_VAR_ssh_private_key: ${{ secrets.SSH_PRIVATE_KEY }}
 
@@ -20,57 +21,87 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+    # ------------------------
+    # CHECKOUT
+    # ------------------------
     - name: Checkout repo
       uses: actions/checkout@v4
 
+    # ------------------------
+    # TERRAFORM SETUP
+    # ------------------------
     - name: Setup Terraform
       uses: hashicorp/setup-terraform@v3
       with:
         terraform_version: 1.6.6
 
+    # ------------------------
+    # TERRAFORM APPLY
+    # ------------------------
     - name: Terraform Init
       working-directory: terraform
       run: terraform init
-
-    - name: Terraform Validate
-      working-directory: terraform
-      run: terraform validate
-
-    - name: Terraform Plan
-      working-directory: terraform
-      run: terraform plan
 
     - name: Terraform Apply
       working-directory: terraform
       run: terraform apply -auto-approve
 
     # ------------------------
-    # TESTING LAYER
+    # GET VM IP
     # ------------------------
     - name: Get VM Public IP
       working-directory: terraform
       run: |
         echo "VM_IP=$(terraform output -raw vm_public_ip)" >> $GITHUB_ENV
 
-    - name: Test Nginx
+    # ------------------------
+    # WAIT FOR K8S
+    # ------------------------
+    - name: Wait for Kubernetes
       run: |
-        echo "Testing Nginx..."
         sleep 60
-        curl -I http://$VM_IP || true
+        ssh -o StrictHostKeyChecking=no azureuser@$VM_IP "kubectl get nodes"
 
-    - name: Test MySQL
+    # ------------------------
+    # INSERT SAMPLE DB DATA
+    # ------------------------
+    - name: Insert Sample DB Data
       run: |
         ssh -o StrictHostKeyChecking=no azureuser@$VM_IP << 'EOF'
-          kubectl get pods
-          kubectl get svc
-          kubectl run mysql-test --rm -it --image=mysql:5.7 -- \
-            mysql -h mysql -u root -prootpass -e "SHOW DATABASES;"
+          kubectl apply -f k8s/mysql-configmap.yaml
+          kubectl apply -f k8s/mysql-test-job.yaml
+          kubectl wait --for=condition=complete job/mysql-init-job --timeout=180s
         EOF
 
     # ------------------------
-    # DESTROY (ALWAYS RUN)
+    # MYSQL PORT FORWARD + VALIDATION
     # ------------------------
-    - name: Terraform Destroy
+    - name: Validate MySQL Data
+      run: |
+        ssh -o StrictHostKeyChecking=no azureuser@$VM_IP << 'EOF'
+          kubectl port-forward svc/mysql 3306:3306 >/tmp/mysql-pf.log 2>&1 &
+          sleep 10
+          mysql -h 127.0.0.1 -u root -prootpass -e "
+            USE demo;
+            SELECT * FROM users;
+          "
+        EOF
+
+    # ------------------------
+    # NGINX PORT FORWARD + TEST
+    # ------------------------
+    - name: Validate Nginx
+      run: |
+        ssh -o StrictHostKeyChecking=no azureuser@$VM_IP << 'EOF'
+          kubectl port-forward svc/nginx-service 8080:80 >/tmp/nginx-pf.log 2>&1 &
+          sleep 10
+          curl -I http://127.0.0.1:8080
+        EOF
+
+    # ------------------------
+    # ALWAYS CLEANUP
+    # ------------------------
+    - name: Terraform Destroy (Always)
       if: always()
       working-directory: terraform
       run: terraform destroy -auto-approve
