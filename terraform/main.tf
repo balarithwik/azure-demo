@@ -109,9 +109,9 @@ resource "azurerm_linux_virtual_machine" "vm" {
   network_interface_ids = [azurerm_network_interface.nic.id]
 
   admin_ssh_key {
-  username   = "azureuser"
-  public_key = var.ssh_public_key
-}
+    username   = "azureuser"
+    public_key = var.ssh_public_key
+  }
 
   os_disk {
     caching              = "ReadWrite"
@@ -145,20 +145,13 @@ resource "azurerm_linux_virtual_machine" "vm" {
       "sleep 120",
 
       "mkdir -p /home/azureuser/.kube",
-      "sudo cp -f /etc/kubernetes/admin.conf /home/azureuser/.kube/config",
+      "sudo cp /etc/kubernetes/admin.conf /home/azureuser/.kube/config",
       "sudo chown azureuser:azureuser /home/azureuser/.kube/config",
 
       "kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml || true",
       "sleep 30",
 
       "kubectl taint nodes --all node-role.kubernetes.io/control-plane- || true",
-
-      "kubectl create deployment nginx --image=nginx || true",
-      "kubectl expose deployment nginx --type=NodePort --port=80 || true",
-
-      "kubectl create deployment mysql --image=mysql:5.7 || true",
-      "kubectl set env deployment/mysql MYSQL_ROOT_PASSWORD=rootpass || true",
-      "kubectl expose deployment mysql --type=NodePort --port=3306 || true",
 
       "kubectl get nodes",
       "kubectl get svc"
