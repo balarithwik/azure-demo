@@ -13,20 +13,6 @@ provider "azurerm" {
 }
 
 # -------------------------------
-# VARIABLES
-# -------------------------------
-variable "ssh_public_key" {
-  description = "SSH public key"
-  type        = string
-}
-
-variable "ssh_private_key" {
-  description = "SSH private key"
-  type        = string
-  sensitive   = true
-}
-
-# -------------------------------
 # RESOURCE GROUP
 # -------------------------------
 resource "azurerm_resource_group" "rg" {
@@ -52,7 +38,7 @@ resource "azurerm_subnet" "subnet" {
 }
 
 # -------------------------------
-# PUBLIC IP (STANDARD SKU — FIXED)
+# PUBLIC IP (STANDARD SKU)
 # -------------------------------
 resource "azurerm_public_ip" "vm_ip" {
   name                = "demo-vm-ip"
