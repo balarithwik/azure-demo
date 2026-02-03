@@ -9,17 +9,25 @@ terraform {
   }
 }
 
+############################
+# PROVIDER (SERVICE PRINCIPAL AUTH)
+############################
+
 provider "azurerm" {
   features {}
+
+  subscription_id = var.subscription_id
+  tenant_id       = var.tenant_id
+  client_id       = var.client_id
+  client_secret   = var.client_secret
 }
 
 ############################
-# RESOURCE GROUP
+# RESOURCE GROUP (EXISTING)
 ############################
 
-resource "azurerm_resource_group" "rg" {
-  name     = "rg-terraform-demo"
-  location = "West US 2"
+data "azurerm_resource_group" "rg" {
+  name = "rg-terraform-demo"
 }
 
 ############################
@@ -28,14 +36,14 @@ resource "azurerm_resource_group" "rg" {
 
 resource "azurerm_virtual_network" "vnet" {
   name                = "demo-vnet"
-  location            = azurerm_resource_group.rg.location
-  resource_group_name = azurerm_resource_group.rg.name
+  location            = data.azurerm_resource_group.rg.location
+  resource_group_name = data.azurerm_resource_group.rg.name
   address_space       = ["10.0.0.0/16"]
 }
 
 resource "azurerm_subnet" "subnet" {
   name                 = "demo-subnet"
-  resource_group_name  = azurerm_resource_group.rg.name
+  resource_group_name  = data.azurerm_resource_group.rg.name
   virtual_network_name = azurerm_virtual_network.vnet.name
   address_prefixes     = ["10.0.1.0/24"]
 }
@@ -46,8 +54,8 @@ resource "azurerm_subnet" "subnet" {
 
 resource "azurerm_network_security_group" "nsg" {
   name                = "demo-nsg"
-  location            = azurerm_resource_group.rg.location
-  resource_group_name = azurerm_resource_group.rg.name
+  location            = data.azurerm_resource_group.rg.location
+  resource_group_name = data.azurerm_resource_group.rg.name
 }
 
 resource "azurerm_subnet_network_security_group_association" "nsg_assoc" {
@@ -56,13 +64,13 @@ resource "azurerm_subnet_network_security_group_association" "nsg_assoc" {
 }
 
 ############################
-# PUBLIC IP (STANDARD SKU)
+# PUBLIC IP
 ############################
 
 resource "azurerm_public_ip" "vm_ip" {
   name                = "demo-vm-ip"
-  location            = azurerm_resource_group.rg.location
-  resource_group_name = azurerm_resource_group.rg.name
+  location            = data.azurerm_resource_group.rg.location
+  resource_group_name = data.azurerm_resource_group.rg.name
 
   allocation_method = "Static"
   sku               = "Standard"
@@ -74,8 +82,8 @@ resource "azurerm_public_ip" "vm_ip" {
 
 resource "azurerm_network_interface" "nic" {
   name                = "demo-nic"
-  location            = azurerm_resource_group.rg.location
-  resource_group_name = azurerm_resource_group.rg.name
+  location            = data.azurerm_resource_group.rg.location
+  resource_group_name = data.azurerm_resource_group.rg.name
 
   ip_configuration {
     name                          = "internal"
@@ -86,15 +94,15 @@ resource "azurerm_network_interface" "nic" {
 }
 
 ############################
-# LINUX VM (CAPACITY SAFE)
+# LINUX VM
 ############################
 
 resource "azurerm_linux_virtual_machine" "vm" {
   name                = "demo-vm"
-  resource_group_name = azurerm_resource_group.rg.name
-  location            = azurerm_resource_group.rg.location
+  resource_group_name = data.azurerm_resource_group.rg.name
+  location            = data.azurerm_resource_group.rg.location
 
-  size           = "Standard_B1s" # 🔥 CHANGED — ALWAYS AVAILABLE
+  size           = "Standard_B1s"
   admin_username = "azureuser"
 
   network_interface_ids = [
