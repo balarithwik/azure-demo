@@ -1,97 +1,135 @@
-name: Terraform Azure CI/CD
+name: Terraform + K8s Full Pipeline
 
 on:
   push:
-    branches: [ "main" ]
-  pull_request:
+    branches:
+      - main
 
-env:
-  # Azure auth (Service Principal)
-  ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-  ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-  ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-  ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-  # SSH keys for VM
-  TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
-  TF_VAR_ssh_private_key: ${{ secrets.SSH_PRIVATE_KEY }}
+  workflow_dispatch:
+    inputs:
+      destroy:
+        description: "Run terraform destroy"
+        required: false
+        default: "false"
 
 jobs:
-  terraform:
+  deploy:
     runs-on: ubuntu-latest
 
+    env:
+      # Azure Auth
+      ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+      ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
+      ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+
+      # SSH keys for VM
+      TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
+      TF_VAR_ssh_private_key: ${{ secrets.SSH_PRIVATE_KEY }}
+
     steps:
-    # ------------------------
+    # -----------------------------
     # CHECKOUT
-    # ------------------------
+    # -----------------------------
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    # ------------------------
-    # TERRAFORM SETUP
-    # ------------------------
+    # -----------------------------
+    # TERRAFORM – INFRA LAYER
+    # -----------------------------
     - name: Setup Terraform
       uses: hashicorp/setup-terraform@v3
-      with:
-        terraform_version: 1.6.6
 
-    # ------------------------
-    # INIT
-    # ------------------------
     - name: Terraform Init
       working-directory: terraform
       run: terraform init
 
-    # ------------------------
-    # VALIDATE
-    # ------------------------
     - name: Terraform Validate
       working-directory: terraform
       run: terraform validate
 
-    # ------------------------
-    # IMPORT EXISTING RG (SAFE)
-    # ------------------------
-    - name: Import existing Resource Group if present
-      working-directory: terraform
-      run: |
-        terraform import azurerm_resource_group.rg \
-        /subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/rg-terraform-demo || true
-
-    # ------------------------
-    # PLAN
-    # ------------------------
-    - name: Terraform Plan
-      working-directory: terraform
-      run: terraform plan
-
-    # ------------------------
-    # APPLY
-    # ------------------------
     - name: Terraform Apply
+      if: github.event.inputs.destroy != 'true'
       working-directory: terraform
       run: terraform apply -auto-approve
 
-    # ------------------------
-    # BASIC VERIFICATION
-    # ------------------------
-    - name: Get VM Public IP
-      id: ip
-      working-directory: terraform
+    # -----------------------------
+    # AZURE LOGIN + KUBECONFIG
+    # -----------------------------
+    - name: Azure Login
+      if: github.event.inputs.destroy != 'true'
       run: |
-        echo "VM_IP=$(terraform output -raw vm_public_ip)" >> $GITHUB_ENV
+        az login --service-principal \
+          -u $ARM_CLIENT_ID \
+          -p $ARM_CLIENT_SECRET \
+          --tenant $ARM_TENANT_ID
 
-    - name: Wait for VM
-      run: sleep 90
-
-    - name: SSH Smoke Test
+    - name: Get AKS Credentials
+      if: github.event.inputs.destroy != 'true'
       run: |
-        ssh -o StrictHostKeyChecking=no azureuser@$VM_IP "echo 'VM is reachable'"
+        az aks get-credentials \
+          --resource-group rg-terraform-demo \
+          --name demo-aks \
+          --overwrite-existing
 
-    # ------------------------
-    # DESTROY (ALWAYS RUNS)
-    # ------------------------
+    # -----------------------------
+    # DB LAYER – MYSQL
+    # -----------------------------
+    - name: Deploy MySQL (DB Layer)
+      if: github.event.inputs.destroy != 'true'
+      run: |
+        kubectl apply -f k8s/mysql-pvc.yaml
+        kubectl apply -f k8s/mysql-deployment.yaml
+        kubectl apply -f k8s/mysql-service.yaml
+
+        kubectl wait --for=condition=available deployment/mysql \
+          --timeout=180s
+
+    # -----------------------------
+    # DATA INSERTION LAYER
+    # -----------------------------
+    - name: Insert Sample Data into MySQL
+      if: github.event.inputs.destroy != 'true'
+      run: |
+        kubectl apply -f k8s/mysql-init-configmap.yaml
+        kubectl apply -f k8s/mysql-init-job.yaml
+
+        kubectl wait --for=condition=complete job/mysql-init \
+          --timeout=120s
+
+    # -----------------------------
+    # APPLICATION LAYER
+    # -----------------------------
+    - name: Deploy Nginx App
+      if: github.event.inputs.destroy != 'true'
+      run: |
+        kubectl apply -f k8s/nginx-deployment.yaml
+        kubectl apply -f k8s/nginx-service.yaml
+
+        kubectl wait --for=condition=available deployment/nginx \
+          --timeout=180s
+
+    # -----------------------------
+    # TESTING LAYER
+    # -----------------------------
+    - name: Run MySQL Tests
+      if: github.event.inputs.destroy != 'true'
+      run: |
+        kubectl apply -f k8s/mysql-test-job.yaml
+        kubectl wait --for=condition=complete job/mysql-test \
+          --timeout=120s
+
+    - name: Run Nginx Tests
+      if: github.event.inputs.destroy != 'true'
+      run: |
+        kubectl apply -f k8s/nginx-test-job.yaml
+        kubectl wait --for=condition=complete job/nginx-test \
+          --timeout=120s
+
+    # -----------------------------
+    # TERRAFORM DESTROY (MANUAL)
+    # -----------------------------
     - name: Terraform Destroy
-      if: always()
+      if: github.event.inputs.destroy == 'true'
       working-directory: terraform
       run: terraform destroy -auto-approve
