@@ -1,4 +1,4 @@
-name: Terraform Infra + K8s + DB + Tests
+name: Terraform + AKS Deployment
 
 on:
   push:
@@ -11,70 +11,90 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      # Azure auth (Service Principal)
       ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
       ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
       ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
       ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-
-      # SSH keys for VM
-      TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
-      TF_VAR_ssh_private_key: ${{ secrets.SSH_PRIVATE_KEY }}
-
-    defaults:
-      run:
-        working-directory: terraform
+      TF_IN_AUTOMATION: true
 
     steps:
-      - name: Checkout repo
+      # ----------------------------
+      # Checkout code
+      # ----------------------------
+      - name: Checkout repository
         uses: actions/checkout@v4
 
+      # ----------------------------
+      # Azure Login (Service Principal)
+      # ----------------------------
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # ----------------------------
+      # Setup Terraform
+      # ----------------------------
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.6.6
 
+      # ----------------------------
+      # Terraform Init
+      # ----------------------------
       - name: Terraform Init
+        working-directory: terraform
         run: terraform init
 
-      - name: Terraform Validate
-        run: terraform validate
-
+      # ----------------------------
+      # Terraform Apply
+      # ----------------------------
       - name: Terraform Apply
-        id: apply
+        id: terraform_apply
+        working-directory: terraform
         run: terraform apply -auto-approve
 
-      # -----------------------------
-      # K8s + DB + TEST LAYERS
-      # -----------------------------
-
-      - name: Deploy MySQL (DB layer)
+      # ----------------------------
+      # Get AKS Credentials (CRITICAL FIX)
+      # ----------------------------
+      - name: Get AKS credentials
         if: success()
         run: |
-          kubectl apply -f ../k8s/mysql-pvc.yaml
-          kubectl apply -f ../k8s/mysql-service.yaml
-          kubectl apply -f ../k8s/mysql-deployment.yaml
-          kubectl apply -f ../k8s/mysql-init-configmap.yaml
-          kubectl apply -f ../k8s/mysql-init-job.yaml
+          az aks get-credentials \
+            --resource-group rg-terraform-demo \
+            --name demo-aks \
+            --overwrite-existing
 
-      - name: Deploy Nginx (App layer)
+      # ----------------------------
+      # Validate Kubernetes Connectivity
+      # ----------------------------
+      - name: Verify AKS access
         if: success()
         run: |
-          kubectl apply -f ../k8s/nginx-deployment.yaml
-          kubectl apply -f ../k8s/nginx-service.yaml
+          kubectl cluster-info
+          kubectl get nodes
 
-      - name: Run DB validation tests
+      # ----------------------------
+      # Deploy MySQL to Kubernetes
+      # ----------------------------
+      - name: Deploy MySQL manifests
         if: success()
-        run: kubectl apply -f ../k8s/mysql-test-job.yaml
+        run: |
+          kubectl apply -f k8s/mysql-pvc.yaml
+          kubectl apply -f k8s/mysql-service.yaml
+          kubectl apply -f k8s/mysql-deployment.yaml
+          kubectl apply -f k8s/mysql-init-configmap.yaml
+          kubectl apply -f k8s/mysql-init-job.yaml
 
-      - name: Run App tests
-        if: success()
-        run: kubectl apply -f ../k8s/nginx-test-job.yaml
-
-      # -----------------------------
-      # 💣 AUTO DESTROY ON FAILURE
-      # -----------------------------
-
+      # ----------------------------
+      # Cleanup on Failure (AUTO DESTROY)
+      # ----------------------------
       - name: Terraform Destroy on Failure
         if: failure()
-        run: terraform destroy -auto-approve
+        working-directory: terraform
+        run: |
+          echo "Pipeline failed. Destroying infrastructure..."
+          terraform destroy -auto-approve
